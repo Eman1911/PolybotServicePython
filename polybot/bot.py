@@ -4,6 +4,7 @@ import os
 import time
 from telebot.types import InputFile
 from polybot.img_proc import Img
+from telebot.types import Message
 
 
 class Bot:
@@ -29,7 +30,7 @@ class Bot:
         self.telegram_bot_client.send_message(chat_id, text, reply_to_message_id=quoted_msg_id)
 
     def is_current_msg_photo(self, msg):
-        return 'photo' in msg
+        return bool(msg.photo)
 
     def download_user_photo(self, msg):
         """
@@ -39,7 +40,7 @@ class Bot:
         if not self.is_current_msg_photo(msg):
             raise RuntimeError(f'Message content of type \'photo\' expected')
 
-        file_info = self.telegram_bot_client.get_file(msg['photo'][-1]['file_id'])
+        file_info = self.telegram_bot_client.get_file(msg.photo[-1].file_id)
         data = self.telegram_bot_client.download_file(file_info.file_path)
         folder_name = file_info.file_path.split('/')[0]
 
@@ -75,4 +76,69 @@ class QuoteBot(Bot):
 
 
 class ImageProcessingBot(Bot):
-    pass
+    def __init__(self, token, telegram_chat_url):
+        super().__init__(token, telegram_chat_url)
+        self.concat_pending = {}
+
+        @self.telegram_bot_client.message_handler(func=lambda message: True, content_types=["text", "photo"])
+        def handle_all(message: Message):
+            self.handle_message(message)
+
+    def handle_message(self, msg: Message):
+        logger.info(f'Incoming message: {msg}')
+        chat_id = msg.chat.id
+
+        if not self.is_current_msg_photo(msg):
+            self.send_text(chat_id, "Please send a photo with one of the following captions:\n"
+                                    "Blur, Contour, Rotate, Segment, Salt and pepper")
+            return
+
+        caption = (msg.caption or "").strip().lower()
+        if not caption:
+            self.send_text(chat_id, "Please include a caption for the filter.")
+            return
+
+        try:
+            photo_path = self.download_user_photo(msg)
+            print("Photo saved at:", photo_path)  # debug print
+            img = Img(photo_path)
+
+            if caption == "blur":
+                img.blur()
+            elif caption == "concat":
+                if chat_id in self.concat_pending:
+                    try:
+                        first_img = self.concat_pending.pop(chat_id)
+                        second_img = Img(photo_path)
+                        result_img = first_img.concat(second_img)  # default = horizontal
+                        result_path = result_img.save_img()
+                        self.send_photo(chat_id, result_path)
+                    except Exception as e:
+                        self.send_text(chat_id, f"Concat failed: {e}")
+                else:
+                    self.concat_pending[chat_id] = Img(photo_path)
+                    self.send_text(chat_id,
+                                   "First image received. Now send the second image with caption 'Concat' to merge.")
+                return
+            elif caption == "contour":
+                img.contour()
+            elif caption == "rotate":
+                img.rotate()
+            elif caption == "segment":
+                self.segment = img.segment()
+            elif caption == "salt and pepper":
+                img.salt_n_pepper()
+            else:
+                self.send_text(chat_id,
+                               "Unsupported caption. Try one of: Blur, Contour, Rotate, Segment, Salt and pepper, concat")
+                return
+
+            result_path = img.save_img()
+            print("Sending image from:", result_path)  # debug print
+            self.send_photo(chat_id, result_path)
+
+        except Exception as e:
+            import traceback
+            print("Error occurred:", e)
+            traceback.print_exc()
+            self.send_text(chat_id, "Something went wrong. Please try again.")
