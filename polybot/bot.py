@@ -5,22 +5,15 @@ import time
 from telebot.types import InputFile
 from polybot.img_proc import Img
 from telebot.types import Message
-
+import requests
 
 class Bot:
-
     def __init__(self, token, telegram_chat_url):
-        # create a new instance of the TeleBot class.
-        # all communication with Telegram servers are done using self.telegram_bot_client
         self.telegram_bot_client = telebot.TeleBot(token)
-
-        # remove any existing webhooks configured in Telegram servers
         self.telegram_bot_client.remove_webhook()
         time.sleep(0.5)
-
-        # set the webhook URL
+        print(f"Setting webhook to: {telegram_chat_url}/{token}/")
         self.telegram_bot_client.set_webhook(url=f'{telegram_chat_url}/{token}/', timeout=60)
-
         logger.info(f'Telegram Bot information\n\n{self.telegram_bot_client.get_me()}')
 
     def send_text(self, chat_id, text):
@@ -33,10 +26,6 @@ class Bot:
         return bool(msg.photo)
 
     def download_user_photo(self, msg):
-        """
-        Downloads the photos that sent to the Bot to `photos` directory (should be existed)
-        :return:
-        """
         if not self.is_current_msg_photo(msg):
             raise RuntimeError(f'Message content of type \'photo\' expected')
 
@@ -55,14 +44,9 @@ class Bot:
     def send_photo(self, chat_id, img_path):
         if not os.path.exists(img_path):
             raise RuntimeError("Image path doesn't exist")
-
-        self.telegram_bot_client.send_photo(
-            chat_id,
-            InputFile(img_path)
-        )
+        self.telegram_bot_client.send_photo(chat_id, InputFile(img_path))
 
     def handle_message(self, msg):
-        """Bot Main message handler"""
         logger.info(f'Incoming message: {msg}')
         self.send_text(msg['chat']['id'], f'Your original message: {msg["text"]}')
 
@@ -70,7 +54,6 @@ class Bot:
 class QuoteBot(Bot):
     def handle_message(self, msg):
         logger.info(f'Incoming message: {msg}')
-
         if msg["text"] != 'Please don\'t quote me':
             self.send_text_with_quote(msg['chat']['id'], msg["text"], quoted_msg_id=msg["message_id"])
 
@@ -84,13 +67,20 @@ class ImageProcessingBot(Bot):
         def handle_all(message: Message):
             self.handle_message(message)
 
+    def predict_image_with_yolo(self, image_path):
+        yolo_url = "http://10.0.4.0:8080/predict"
+        with open(image_path, 'rb') as img:
+            files = {'file': img}
+            response = requests.post(yolo_url, files=files)
+            return response.json()
+
     def handle_message(self, msg: Message):
         logger.info(f'Incoming message: {msg}')
         chat_id = msg.chat.id
 
         if not self.is_current_msg_photo(msg):
             self.send_text(chat_id, "Please send a photo with one of the following captions:\n"
-                                    "Blur, Contour, Rotate, Segment, Salt and pepper")
+                                    "Blur, Contour, Rotate, Segment, Salt and pepper, Detect")
             return
 
         caption = (msg.caption or "").strip().lower()
@@ -100,7 +90,7 @@ class ImageProcessingBot(Bot):
 
         try:
             photo_path = self.download_user_photo(msg)
-            print("Photo saved at:", photo_path)  # debug print
+            print("Photo saved at:", photo_path)
             img = Img(photo_path)
 
             if caption == "blur":
@@ -110,7 +100,7 @@ class ImageProcessingBot(Bot):
                     try:
                         first_img = self.concat_pending.pop(chat_id)
                         second_img = Img(photo_path)
-                        result_img = first_img.concat(second_img)  # default = horizontal
+                        result_img = first_img.concat(second_img)
                         result_path = result_img.save_img()
                         self.send_photo(chat_id, result_path)
                     except Exception as e:
@@ -128,13 +118,26 @@ class ImageProcessingBot(Bot):
                 self.segment = img.segment()
             elif caption == "salt and pepper":
                 img.salt_n_pepper()
+            elif caption == "detect":
+                yolo_url = "http://10.0.4.0:8080/predict"
+                files = {'file': open(photo_path, 'rb')}
+                response = requests.post(yolo_url, files=files)
+
+                if response.ok:
+                    predictions = response.json().get('labels', [])
+                    print("YOLO RESPONSE JSON:", response.json())
+                    result_text = "Detected objects: " + ', '.join(predictions)
+                    self.send_text(chat_id, result_text)
+                else:
+                    self.send_text(chat_id, f"Detection failed: {response.status_code}")
+                return
             else:
                 self.send_text(chat_id,
-                               "Unsupported caption. Try one of: Blur, Contour, Rotate, Segment, Salt and pepper, concat")
+                               "Unsupported caption. Try one of: Blur, Contour, Rotate, Segment, Salt and pepper, Concat, Detect")
                 return
 
             result_path = img.save_img()
-            print("Sending image from:", result_path)  # debug print
+            print("Sending image from:", result_path)
             self.send_photo(chat_id, result_path)
 
         except Exception as e:
